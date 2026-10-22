@@ -1,0 +1,12 @@
+mobilitypulse:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: localhost
+      user: mobility
+      password: mobilitypulse_dev
+      port: 5432
+      dbname: mobilitypulse
+      schema: public
+      threads: 4

@@ -1,0 +1,14 @@
+name: mobilitypulse
+version: "1.0.0"
+config-version: 2
+profile: mobilitypulse
+model-paths: ["models"]
+test-paths: ["tests"]
+models:
+  mobilitypulse:
+    staging:
+      +schema: staging
+    clean:
+      +schema: clean
+    analytics:
+      +schema: analytics
