@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import pandas as pd
 from psycopg.types.json import Jsonb
@@ -113,56 +112,37 @@ def load_taxi_zones() -> int:
 
 
 def load_tlc() -> int:
+    """Bulk-load filtered TLC Parquet in bounded Arrow batches via PostgreSQL COPY."""
+    import pyarrow.parquet as pq
     paths = sorted((RAW_DIR / "tlc" / "filtered").glob("yellow_tripdata_*.parquet"))
+    if not paths:
+        raise FileNotFoundError(f"No filtered TLC Parquet files found under {RAW_DIR / 'tlc' / 'filtered'}")
     total = 0
-
+    columns = TLC_FIELDS + ["source_month"]
     with connect() as conn:
         conn.execute("TRUNCATE raw.tlc_yellow")
-
         for path in paths:
             month = path.stem.replace("yellow_tripdata_", "")
-            df = pd.read_parquet(path)
-            selected = {}
-
-            for target, candidates in TLC_MAP.items():
-                source = next((c for c in candidates if c in df.columns), None)
-                selected[target] = df[source] if source else None
-
-            frame = pd.DataFrame(selected)
-            frame["source_month"] = f"{month}-01"
-
-            for start in range(0, len(frame), 2000):
-                chunk = frame.iloc[start:start + 2000]
-                rows = []
-
-                for record in chunk[TLC_FIELDS + ["source_month"]].itertuples(
-                    index=False, name=None
-                ):
-                    values = list(record)
-                    for i in (0, 1):
-                        if values[i] is not None and hasattr(values[i], "isoformat"):
-                            values[i] = values[i].isoformat(sep=" ")
-
-                    values = [nullable(v) for v in values]
-                    digest = hashlib.sha1(
-                        "|".join("" if v is None else str(v) for v in values[:-1])
-                        .encode("utf-8")
-                    ).hexdigest()
-                    row_hash = int(digest[:15], 16)
-                    rows.append(tuple(values + [row_hash]))
-
-                if rows:
-                    columns = TLC_FIELDS + ["source_month", "row_hash"]
-                    placeholders = ",".join(["%s"] * len(columns))
-                    executemany(
-                        conn,
-                        f"INSERT INTO raw.tlc_yellow ({','.join(columns)}) VALUES ({placeholders})",
-                        rows,
-                    )
-                    total += len(rows)
-
-            print(f"Loaded TLC {month}: {len(df):,} rows")
-
+            parquet = pq.ParquetFile(path)
+            month_count = 0
+            with conn.cursor() as cur:
+                with cur.copy("COPY raw.tlc_yellow (" + ",".join(columns) + ") FROM STDIN") as copy:
+                    for batch in parquet.iter_batches(batch_size=50_000):
+                        frame = batch.to_pandas()
+                        selected = {}
+                        for target, candidates in TLC_MAP.items():
+                            source = next((c for c in candidates if c in frame.columns), None)
+                            selected[target] = frame[source] if source else [None] * len(frame)
+                        selected_frame = pd.DataFrame(selected)
+                        for record in selected_frame[columns[:-1]].itertuples(index=False, name=None):
+                            values = [nullable(v) for v in record]
+                            for i in (0, 1):
+                                if values[i] is not None and hasattr(values[i], "isoformat"):
+                                    values[i] = values[i].isoformat(sep=" ")
+                            copy.write_row(tuple(values) + (f"{month}-01",))
+                        month_count += len(frame)
+            total += month_count
+            print(f"Loaded TLC {month}: {month_count:,} rows", flush=True)
     print(f"TLC raw rows loaded: {total:,}")
     return total
 
@@ -247,6 +227,14 @@ def load_collisions() -> int:
 
 def main() -> None:
     print("Loading source data...")
+    required = [RAW_DIR / "weather" / "manhattan_hourly.json"]
+    missing = [str(path) for path in required if not path.exists()]
+    if not list(RAW_DIR.glob("dot_traffic/date=*/manhattan.jsonl")):
+        missing.append("DOT JSONL files (data/raw/dot_traffic/date=*/manhattan.jsonl)")
+    if not list((RAW_DIR / "tlc" / "filtered").glob("yellow_tripdata_*.parquet")):
+        missing.append("filtered TLC Parquet files (data/raw/tlc/filtered)")
+    if missing:
+        raise FileNotFoundError("Required source inputs missing: " + "; ".join(missing))
     load_taxi_zones()
     load_dot()
     load_tlc()

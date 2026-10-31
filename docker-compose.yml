@@ -6,11 +6,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-mobilitypulse}
       POSTGRES_USER: ${POSTGRES_USER:-mobility}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mobilitypulse_dev}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -20,18 +18,86 @@ services:
   mlflow:
     image: python:3.11-slim
     container_name: mobilitypulse-mlflow
-    profiles: ["mlflow"]
+    restart: unless-stopped
     working_dir: /mlflow
     command: >-
-      sh -c "pip install --no-cache-dir mlflow==2.18.0 psycopg[binary] &&
-      mlflow server --host 0.0.0.0 --port 5000
-      --backend-store-uri sqlite:////mlflow/mlflow.db
-      --default-artifact-root /mlflow/artifacts"
-    ports:
-      - "5000:5000"
+      sh -c "pip install --no-cache-dir mlflow==2.18.0 SQLAlchemy==2.0.36 &&
+      mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////mlflow/mlflow.db
+      --serve-artifacts --artifacts-destination /mlflow/artifacts"
+    ports: ["5000:5000"]
+    volumes: ["mlruns:/mlflow"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build: .
+    image: mobilitypulse-app:latest
+    container_name: mobilitypulse-app
+    profiles: ["pipeline"]
+    environment: &app_env
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-mobilitypulse}
+      POSTGRES_USER: ${POSTGRES_USER:-mobility}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      RAW_DIR: data/raw
+      PROCESSED_DIR: data/processed
+      MODEL_DIR: models
+      PYTHONPATH: /opt/mobility-pulse
     volumes:
-      - mlruns:/mlflow
+      - ./data:/opt/mobility-pulse/data
+      - ./models:/opt/mobility-pulse/models
+    depends_on:
+      postgres: {condition: service_healthy}
+      mlflow: {condition: service_healthy}
+    command: ["python", "-m", "scripts.run_pipeline"]
+
+  dashboard:
+    build: .
+    image: mobilitypulse-app:latest
+    container_name: mobilitypulse-dashboard
+    restart: unless-stopped
+    environment: *app_env
+    volumes:
+      - ./data:/opt/mobility-pulse/data:ro
+      - ./models:/opt/mobility-pulse/models:ro
+    ports: ["8501:8501"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    command: ["streamlit", "run", "dashboards/app.py", "--server.address=0.0.0.0"]
+
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    image: mobilitypulse-airflow:latest
+    container_name: mobilitypulse-airflow
+    restart: unless-stopped
+    profiles: ["airflow"]
+    environment:
+      <<: *app_env
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      PYTHONPATH: /opt/mobility-pulse
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./data:/opt/mobility-pulse/data
+      - ./models:/opt/mobility-pulse/models
+      - airflow_home:/opt/airflow
+      - ./:/opt/mobility-pulse
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      mlflow: {condition: service_healthy}
+    command: bash -c "airflow db migrate && airflow standalone"
 
 volumes:
   postgres_data:
   mlruns:
+  airflow_home:

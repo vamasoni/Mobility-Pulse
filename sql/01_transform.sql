@@ -6,7 +6,7 @@ SELECT
  NULLIF(payload->>'speed','')::double precision,
  NULLIF(payload->>'travel_time','')::double precision,
  NULLIF(payload->>'status','')::integer,
- NULLIF(payload->>'data_as_of','')::timestamptz,
+ (NULLIF(payload->>'data_as_of','')::timestamp AT TIME ZONE 'America/New_York'),
  NULLIF(payload->>'link_id','')::bigint,
  payload->>'link_points', payload->>'encoded_poly_line', payload->>'encoded_poly_line_lvls',
  payload->>'owner', NULLIF(payload->>'transcom_id','')::bigint,
@@ -28,11 +28,23 @@ SELECT DISTINCT ON (ts_local)
 FROM raw.weather
 ORDER BY ts_local;
 
+INSERT INTO clean.dim_zone(location_id,borough,zone,service_zone)
+SELECT location_id,borough,zone,service_zone FROM raw.taxi_zone_lookup
+ON CONFLICT(location_id) DO UPDATE SET borough=EXCLUDED.borough,zone=EXCLUDED.zone,service_zone=EXCLUDED.service_zone;
+
+INSERT INTO clean.dim_segment(segment_id,link_name,owner)
+SELECT DISTINCT ON(id) id,link_name,owner FROM staging.dot_traffic WHERE id IS NOT NULL
+ORDER BY id,loaded_at DESC
+ON CONFLICT(segment_id) DO UPDATE SET link_name=EXCLUDED.link_name,owner=EXCLUDED.owner;
+
 INSERT INTO staging.collisions
 SELECT collision_id,
- (crash_date || ' ' || COALESCE(crash_time,'00:00'))::timestamp,
+ (
+    (crash_date::timestamp::date::text || ' ' ||
+     COALESCE(NULLIF(crash_time, ''), '00:00'))::timestamp
+),
  borough, latitude, longitude, COALESCE(persons_injured,0), COALESCE(persons_killed,0),
- CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN ST_SetSRID(ST_MakePoint(longitude,latitude),4326) END
+ CASE WHEN latitude BETWEEN -90 AND 90 AND longitude BETWEEN -180 AND 180 AND NOT (latitude=0 AND longitude=0) THEN ST_SetSRID(ST_MakePoint(longitude,latitude),4326) END
 FROM raw.collisions
 WHERE collision_id IS NOT NULL;
 

@@ -1,83 +1,49 @@
-# MobilityPulse — End-to-End Mobility Analytics Platform
-
-MobilityPulse is a clean, reproducible NYC mobility analytics project covering data engineering, analytics, forecasting, anomaly detection, clustering, root-cause analysis, and an interactive dashboard.
-
-## Scope
-
-- Manhattan
-- January–May 2026 by default
-- NYC DOT Traffic Speeds
-- NYC TLC Yellow Taxi
-- NYC Motor Vehicle Collisions
-- Open-Meteo hourly weather
-- OpenStreetMap road network
+# MobilityPulse — Docker-first NYC mobility analytics
 
 ## Architecture
+PostgreSQL/PostGIS stores raw, staging, clean and analytics schemas. The app image contains ingestion, SQL/feature engineering, ML and Streamlit dependencies. Airflow (optional profile) orchestrates the same Python modules. MLflow tracks experiments. Local `data/` and `models/` are bind-mounted; database and MLflow state use named volumes.
 
-NYC APIs/files → Python ingestion → raw filesystem + optional MinIO/S3 → PostgreSQL/PostGIS (`raw → staging → clean → analytics`) → dbt/tests → ML → MLflow → Streamlit/Power BI-ready analytics.
+## Prerequisites
+- Docker Desktop with Compose v2 and sufficient memory/disk for Parquet and model training.
+- NYC source data is downloaded by `ingestion.run_all`; this requires network access and Socrata/TLC endpoints to provide the configured date range.
+- Copy `.env.example` to `.env` and set a strong `POSTGRES_PASSWORD`.
 
-## Clean-start principle
-
-This repository intentionally has one configuration source: `.env`.
-
-PostgreSQL credentials are passed to Docker Compose and Python from the same `.env`, eliminating the credential drift that commonly happens when containers and local Python use different passwords.
-
-## Quick start
-
+## Start infrastructure and dashboard
 ```powershell
-copy .env.example .env
-docker compose down -v
-docker compose up -d postgres postgis-init minio
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python scripts/check_connection.py
+Copy-Item .env.example .env
+# Edit .env and set POSTGRES_PASSWORD
+docker compose up -d --build postgres mlflow dashboard
 ```
+Open http://localhost:8501. The dashboard intentionally displays diagnostic empty states before analytics data exists.
 
-Then initialize the warehouse:
-
+## Run the complete pipeline inside Docker
 ```powershell
-python scripts/init_db.py
+docker compose --profile pipeline run --rm app
 ```
+This initializes the schema, downloads/extracts source data, loads raw tables, builds analytics and features, trains LightGBM, and runs anomaly/clustering/monitoring stages. It can take a long time for multi-month TLC data. Do not launch duplicate runs concurrently.
 
-Run ingestion:
-
+## Optional Airflow orchestration
 ```powershell
-python -m ingestion.run_all
+docker compose --profile airflow up -d --build airflow
 ```
+Open http://localhost:8080. Airflow standalone creates the admin account; retrieve its initial password from the container logs. The `mobilitypulse_end_to_end` DAG is manual-triggered. It initializes the database and downloads sources before loading and transforming them.
 
-Build analytics:
+## MLflow
+Open http://localhost:5000. Tracking uses a persistent SQLite backend and artifact proxy in the MLflow container.
 
+## Important data semantics
+- All traffic fact timestamps are stored as `timestamptz` instants. The current SQL interprets DOT `data_as_of` as America/New_York local wall time. Verify this against the live source metadata before relying on time-of-day analysis; change only if the endpoint supplies UTC or explicit offsets.
+- TLC pickup/dropoff and Open-Meteo hourly timestamps are treated as New York local wall time.
+- Incident records without a borough are excluded from the Manhattan subset. Invalid (0,0) coordinates are retained as null geometry, not a point at Null Island.
+- Current taxi/incident enrichment remains citywide/hourly, not road-segment-specific. Do not interpret it as a causal or segment-level relationship.
+- Free-flow speed is currently estimated from the full available traffic history. Treat model evaluation as exploratory until a leakage-safe training-only free-flow reference is implemented.
+
+## Validation and limitations
+Run `python -m compileall -q .` and `pytest -q` inside the app image for basic checks. The code has not been executed against your actual Postgres instance or full NYC source data in this environment. Forecast accuracy, source endpoint historical coverage, and DOT timestamp semantics must be verified on your machine. LightGBM evaluation uses a chronological timestamp split and reports persistence, previous-day and previous-week baselines; it is not a hyperparameter-tuned production model.
+
+## Useful commands
 ```powershell
-python scripts/build_analytics.py
+docker compose ps
+docker compose logs --tail=100 postgres mlflow dashboard
+docker compose exec postgres psql -U mobility -d mobilitypulse
 ```
-
-Build ML features and models:
-
-```powershell
-python ml/build_features.py
-python ml/forecast.py
-python ml/forecast_xgb.py
-python ml/anomaly.py
-python ml/clustering.py
-python ml/root_cause.py
-python ml/monitor.py
-```
-
-Run the dashboard:
-
-```powershell
-streamlit run dashboards/app.py
-```
-
-MLflow:
-
-```powershell
-docker compose --profile mlflow up -d mlflow
-```
-
-## Notes
-
-The raw layer is local by default for fast development. `storage/s3.py` provides the MinIO/S3 adapter required by the architecture. The project can be switched to S3 with configuration rather than rewriting ingestion code.
-
-Kafka, Spark, and deep learning are deliberately excluded from the first finished version, as recommended by the project scope.

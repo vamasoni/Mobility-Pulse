@@ -283,3 +283,8 @@ CREATE TABLE IF NOT EXISTS analytics.data_quality_log (
     metric_value double precision,
     details text
 );
+
+CREATE INDEX IF NOT EXISTS idx_dot_data_as_of ON staging.dot_traffic(data_as_of);
+CREATE INDEX IF NOT EXISTS idx_tlc_pickup_ts ON staging.tlc_yellow(pickup_ts);
+CREATE INDEX IF NOT EXISTS idx_incidents_ts ON analytics.fact_incidents(ts_local);
+CREATE INDEX IF NOT EXISTS idx_predictions_forecast_ts ON analytics.ml_predictions(forecast_ts);
